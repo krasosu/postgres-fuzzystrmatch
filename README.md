@@ -33,6 +33,10 @@ Schema neu aufsetzen (Init-Skripte laufen nur bei leerem Volume): `docker compos
 
 Direkt in psql: `docker exec -it fuzzy-db-postgres psql -U fuzzy fuzzydb`
 
+**pgAdmin**: http://127.0.0.1:5050 – ohne Login (Desktop-Modus), der Server „fuzzy-db“ ist vorkonfiguriert
+und verbindet ohne Passwortabfrage. Daten ansehen: *fuzzy-db → Databases → fuzzydb → Schemas → public →
+Tables → sample*, Rechtsklick → *View/Edit Data*, oder *Tools → Query Tool* für eigenes SQL.
+
 ## Tabelle `sample`
 
 | Spalte | Typ | |
@@ -64,6 +68,15 @@ passender Länge in Frage. Über den Index auf `char_length(content)` dauert das
 SELECT id, fuzzy_substring_distance(content, 'ADCBXYZW', 2) AS dist
 FROM sample
 WHERE fuzzy_substring_distance(content, 'ADCBXYZW', 2) <= 2;
+```
+
+**3. Teilstring, nur vertauschte Zeichen (Hamming)** – irgendwo im `content` steht ein Abschnitt mit
+genau der Länge des Musters, der sich an höchstens k Stellen unterscheidet (kein Einfügen/Löschen)
+
+```sql
+SELECT id, fuzzy_substring_hamming(content, '101010', 2) AS abweichung
+FROM sample
+WHERE fuzzy_substring_hamming(content, '101010', 2) <= 2;
 ```
 
 ## Wichtige Erkenntnisse

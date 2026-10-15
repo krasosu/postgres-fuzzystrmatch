@@ -142,3 +142,49 @@ BEGIN
     RETURN least(best, max_d + 1);
 END;
 $$;
+
+-- Substring search with substitutions only (Hamming distance): is there a window of exactly
+-- len(needle) characters in haystack that differs from needle in at most max_d positions?
+-- Returns the smallest number of differing positions if it is <= max_d, otherwise max_d + 1.
+CREATE OR REPLACE FUNCTION fuzzy_substring_hamming(haystack text, needle text, max_d int)
+RETURNS int
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+COST 100000                                   -- expensive: lets the planner go parallel
+AS $$
+DECLARE
+    n     int := char_length(haystack);
+    m     int := char_length(needle);
+    hc    text[];
+    nc    text[];
+    best  int := max_d + 1;
+    s     int;
+    i     int;
+    diffs int;
+BEGIN
+    IF m = 0 THEN
+        RETURN 0;
+    END IF;
+    IF m > n THEN
+        RETURN best;
+    END IF;
+
+    hc := regexp_split_to_array(haystack, '');
+    nc := regexp_split_to_array(needle, '');
+
+    FOR s IN 0..n - m LOOP
+        diffs := 0;
+        FOR i IN 1..m LOOP
+            IF hc[s + i] <> nc[i] THEN
+                diffs := diffs + 1;
+                EXIT WHEN diffs >= best;      -- this window cannot beat the best one
+            END IF;
+        END LOOP;
+        IF diffs < best THEN
+            best := diffs;
+            EXIT WHEN best = 0;
+        END IF;
+    END LOOP;
+
+    RETURN best;
+END;
+$$;

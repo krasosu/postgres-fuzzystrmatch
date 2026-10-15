@@ -30,5 +30,55 @@ services:
       timeout: 3s
       retries: 20
 
+  pgadmin:
+    image: dpage/pgadmin4:9
+    container_name: fuzzy-db-pgadmin
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Desktop mode: no pgAdmin login, fine for a local PoC bound to 127.0.0.1
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      # Still required by the image, unused in desktop mode
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_SERVER_JSON_FILE: /pgadmin4/servers.json
+      PGADMIN_REPLACE_SERVERS_ON_STARTUP: "True"
+      # Copied to /var/lib/pgadmin/.pgpass on first start, so the server connects without a prompt
+      PGPASS_FILE: /pgadmin4/pgpass
+    configs:
+      - source: pgadmin_servers
+        target: /pgadmin4/servers.json
+      - source: pgadmin_pgpass
+        target: /pgadmin4/pgpass
+    ports:
+      - "127.0.0.1:${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin:/var/lib/pgadmin
+
+configs:
+  pgadmin_servers:
+    content: |
+      {
+        "Servers": {
+          "1": {
+            "Name": "fuzzy-db",
+            "Group": "Servers",
+            "Host": "postgres",
+            "Port": 5432,
+            "MaintenanceDB": "${POSTGRES_DB:-fuzzydb}",
+            "Username": "${POSTGRES_USER:-fuzzy}",
+            "PassFile": "/var/lib/pgadmin/.pgpass",
+            "SSLMode": "prefer"
+          }
+        }
+      }
+  pgadmin_pgpass:
+    content: |
+      postgres:5432:*:${POSTGRES_USER:-fuzzy}:${POSTGRES_PASSWORD:-fuzzy}
+
 volumes:
   pgdata:
+  pgadmin:
