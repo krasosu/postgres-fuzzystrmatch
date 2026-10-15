@@ -1,0 +1,5 @@
+.env
+app/target/
+.idea/
+*.iml
+.vscode/

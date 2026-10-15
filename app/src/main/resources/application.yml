@@ -1,0 +1,30 @@
+spring:
+  main:
+    banner-mode: off
+    web-application-type: none
+  datasource:
+    # reWriteBatchedInserts turns JDBC batches into multi-row INSERTs (much faster bulk load)
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:fuzzydb}?reWriteBatchedInserts=true
+    username: ${POSTGRES_USER:fuzzy}
+    password: ${POSTGRES_PASSWORD:fuzzy}
+
+logging:
+  level:
+    root: warn
+    de.krasosu.fuzzydb: info
+
+fuzzy:
+  generate:
+    count: 5000
+    batch-size: 500
+    min-length: 10
+    max-length: 10000
+    # Extra rows that are guaranteed to match the demo searches (pattern mutated by 0..max-distance edits)
+    planted-whole: 25
+    planted-substring: 25
+  demo:
+    binary-pattern: "10101010"
+    ascii-pattern: "ADCBXYZW"
+    max-distance: 3
+    # 3 edits on an 8 char pattern already match lots of random text, so the substring demo uses 2
+    substring-max-distance: 2
