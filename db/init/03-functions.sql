@@ -92,7 +92,8 @@ $$;
 
 -- Approximate substring search (Sellers algorithm): smallest edit distance between needle and
 -- any substring of haystack, i.e. "content contains roughly <needle>". O(len(haystack) * len(needle)),
--- no length limit. Returns the exact distance if it is <= max_d, otherwise max_d + 1.
+-- no length limit. '?' in needle is a wildcard that matches any character.
+-- Returns the exact distance if it is <= max_d, otherwise max_d + 1.
 CREATE OR REPLACE FUNCTION fuzzy_substring_distance(haystack text, needle text, max_d int)
 RETURNS int
 LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
@@ -127,7 +128,7 @@ BEGIN
         d[0] := 0;                            -- a match may start at any position
         FOR i IN 1..m LOOP
             up := d[i];
-            v := least(diag + CASE WHEN nc[i] = t THEN 0 ELSE 1 END,
+            v := least(diag + CASE WHEN nc[i] = t OR nc[i] = '?' THEN 0 ELSE 1 END,
                        up + 1,
                        d[i - 1] + 1);
             diag := up;
@@ -145,38 +146,62 @@ $$;
 
 -- Substring search with substitutions only (Hamming distance): is there a window of exactly
 -- len(needle) characters in haystack that differs from needle in at most max_d positions?
+-- '?' in needle is a wildcard that matches any character.
+-- Works on pre-split character arrays so callers can split a haystack once and reuse it.
 -- Returns the smallest number of differing positions if it is <= max_d, otherwise max_d + 1.
-CREATE OR REPLACE FUNCTION fuzzy_substring_hamming(haystack text, needle text, max_d int)
+CREATE OR REPLACE FUNCTION fuzzy_hamming_arrays(hc text[], nc text[], max_d int)
 RETURNS int
 LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
 COST 100000                                   -- expensive: lets the planner go parallel
 AS $$
 DECLARE
-    n     int := char_length(haystack);
-    m     int := char_length(needle);
-    hc    text[];
-    nc    text[];
+    n     int := coalesce(array_length(hc, 1), 0);
+    m     int := coalesce(array_length(nc, 1), 0);
+    pos   int[];  -- needle positions that are not wildcards; only these are compared
+    cnt   int;
     best  int := max_d + 1;
     s     int;
-    i     int;
+    j     int;
+    p     int;
     diffs int;
 BEGIN
-    IF m = 0 THEN
-        RETURN 0;
-    END IF;
     IF m > n THEN
         RETURN best;
     END IF;
 
-    hc := regexp_split_to_array(haystack, '');
-    nc := regexp_split_to_array(needle, '');
+    SELECT coalesce(array_agg(i ORDER BY i), '{}') INTO pos
+    FROM generate_subscripts(nc, 1) AS i
+    WHERE nc[i] <> '?';
+    cnt := coalesce(array_length(pos, 1), 0);
+    IF cnt = 0 THEN
+        RETURN 0;                             -- only wildcards: every window matches
+    END IF;
+
+    IF cnt = m THEN
+        -- no wildcards: compare directly, without the indirection through pos[]
+        FOR s IN 0..n - m LOOP
+            diffs := 0;
+            FOR p IN 1..m LOOP
+                IF hc[s + p] <> nc[p] THEN
+                    diffs := diffs + 1;
+                    EXIT WHEN diffs >= best;  -- this window cannot beat the best one
+                END IF;
+            END LOOP;
+            IF diffs < best THEN
+                best := diffs;
+                EXIT WHEN best = 0;
+            END IF;
+        END LOOP;
+        RETURN best;
+    END IF;
 
     FOR s IN 0..n - m LOOP
         diffs := 0;
-        FOR i IN 1..m LOOP
-            IF hc[s + i] <> nc[i] THEN
+        FOR j IN 1..cnt LOOP
+            p := pos[j];
+            IF hc[s + p] <> nc[p] THEN
                 diffs := diffs + 1;
-                EXIT WHEN diffs >= best;      -- this window cannot beat the best one
+                EXIT WHEN diffs >= best;
             END IF;
         END LOOP;
         IF diffs < best THEN
@@ -186,5 +211,60 @@ BEGIN
     END LOOP;
 
     RETURN best;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION fuzzy_substring_hamming(haystack text, needle text, max_d int)
+RETURNS int
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+COST 100000
+AS $$
+    SELECT CASE
+        WHEN needle = '' THEN 0
+        ELSE fuzzy_hamming_arrays(regexp_split_to_array(haystack, ''),
+                                  regexp_split_to_array(needle, ''), max_d)
+    END
+$$;
+
+-- Same search with the tolerance as a fraction of the needle, e.g. 0.10 = 10 %.
+-- Allowed mismatches = floor(non-wildcard characters * tolerance); wildcards never mismatch,
+-- so they do not count. Returns the number of mismatches, or NULL if there is no match,
+-- so a query only needs "WHERE fuzzy_substring_hamming_pct(...) IS NOT NULL".
+CREATE OR REPLACE FUNCTION fuzzy_substring_hamming_pct(haystack text, needle text, tolerance numeric)
+RETURNS int
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+COST 100000
+AS $$
+    SELECT nullif(d, k + 1)
+    FROM (SELECT floor(char_length(replace(needle, '?', '')) * tolerance)::int AS k) AS lim,
+         LATERAL (SELECT fuzzy_substring_hamming(haystack, needle, lim.k) AS d) AS res
+$$;
+
+-- Several needles in one pass over the row: haystack is detoasted and split only once.
+-- Returns one row per needle that matches with at most max_d mismatches ('?' = wildcard).
+-- Call it in the SELECT list of a subquery, not via LATERAL in FROM: the planner costs a lateral
+-- function scan as if it ran only once, so it never parallelises that form (~5x slower here).
+--   SELECT id, (m).sequenz, (m).abweichung
+--   FROM (SELECT id, fuzzy_substring_hamming_multi(content, ARRAY['0101', '11?0'], 1) AS m FROM sample) t
+CREATE OR REPLACE FUNCTION fuzzy_substring_hamming_multi(haystack text, needles text[], max_d int)
+RETURNS TABLE (sequenz text, abweichung int)
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+COST 100000 ROWS 1
+AS $$
+DECLARE
+    hc     text[] := regexp_split_to_array(haystack, '');
+    needle text;
+    d      int;
+BEGIN
+    FOREACH needle IN ARRAY needles LOOP
+        CONTINUE WHEN needle IS NULL;
+        d := CASE WHEN needle = '' THEN 0
+                  ELSE fuzzy_hamming_arrays(hc, regexp_split_to_array(needle, ''), max_d) END;
+        IF d <= max_d THEN
+            sequenz := needle;
+            abweichung := d;
+            RETURN NEXT;
+        END IF;
+    END LOOP;
 END;
 $$;
